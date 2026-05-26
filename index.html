@@ -46,7 +46,7 @@
         /**
          * アプリケーションの状態管理と設定
          */
-        const ADMIN_PASSWORD = "???"; // 【重要】公開時はこのパスワードを変更してください
+        const ADMIN_PASSWORD = "admin"; // 
         const STORAGE_KEY = "quick_survey_data";
         const ANSWERS_KEY = "quick_survey_answers"; // シミュレーション用の回答保存先
         
@@ -90,7 +90,7 @@
         }
 
         function saveData() {
-            // 【重要】状態が変わるたびに呼び出し、データ消失を防ぐ
+            //
             localStorage.setItem(STORAGE_KEY, JSON.stringify(state.survey));
         }
 
