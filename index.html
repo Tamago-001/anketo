@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="ja" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quick Survey Maker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <script>
+        // Tailwindのダークモード設定
+        tailwind.config = {
+            darkMode: 'class',
+            theme: { extend: {} }
+        }
+    </script>
+    <style>
+        /* スムーズなトランジション設定 */
+        body { transition: background-color 0.3s, color 0.3s; }
+        .tab-active { border-bottom: 2px solid #3b82f6; color: #3b82f6; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800 dark:bg-gray-900 dark:text-gray-200 min-h-screen">
+
+    <header class="bg-white dark:bg-gray-800 shadow-sm sticky top-0 z-50">
+        <div class="max-w-4xl mx-auto px-4 py-4 flex justify-between items-center">
+            <h1 class="text-xl font-bold text-blue-600 dark:text-blue-400">
+                <i class="fa-solid fa-square-poll-horizontal mr-2"></i>Quick Survey
+            </h1>
+            <div class="flex items-center gap-4">
+                <button id="theme-toggle" class="text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded-full transition">
+                    <i id="theme-icon" class="fa-solid fa-moon"></i>
+                </button>
+                <button id="admin-btn" class="text-sm bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 px-3 py-1 rounded transition">
+                    管理画面
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-4 py-8" id="app-container">
+        </main>
+
+    <script>
+        /**
+         * アプリケーションの状態管理と設定
+         */
+        const ADMIN_PASSWORD = "???"; // 【重要】公開時はこのパスワードを変更してください
+        const STORAGE_KEY = "quick_survey_data";
+        const ANSWERS_KEY = "quick_survey_answers"; // シミュレーション用の回答保存先
+        
+        // Formspree等のエンドポイント（本番運用時に設定）
+        // 例: "https://formspree.io/f/YOUR_FORM_ID"
+        const FORMSPREE_ENDPOINT = "https://formspree.io/f/xpqnybyz"; 
+
+        let state = {
+            mode: 'answer', // 'answer' または 'admin'
+            isAdminAuthenticated: false,
+            adminTab: 'edit', // 'edit' または 'results'
+            survey: {
+                title: "新しいアンケート",
+                description: "アンケートの説明をここに入力します。",
+                questions: []
+            }
+        };
+
+        // --- 初期化処理 ---
+        function init() {
+            loadData();
+            setupTheme();
+            setupEventListeners();
+            
+            // URLパラメータで画面を出し分ける (?mode=admin)
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('mode') === 'admin') {
+                requestAdminAccess();
+            } else {
+                state.mode = 'answer';
+                render();
+            }
+        }
+
+        // --- ローカルストレージ管理 (自動保存) ---
+        function loadData() {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (saved) {
+                state.survey = JSON.parse(saved);
+            }
+        }
+
+        function saveData() {
+            // 【重要】状態が変わるたびに呼び出し、データ消失を防ぐ
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state.survey));
+        }
+
+        // --- ダークモード設定 ---
+        function setupTheme() {
+            const btn = document.getElementById('theme-toggle');
+            const icon = document.getElementById('theme-icon');
+            const html = document.documentElement;
+
+            // OSのプレファレンスまたは過去の選択を読み込む
+            if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                html.classList.add('dark');
+                icon.className = "fa-solid fa-sun";
+            } else {
+                html.classList.remove('dark');
+                icon.className = "fa-solid fa-moon";
+            }
+
+            btn.addEventListener('click', () => {
+                html.classList.toggle('dark');
+                if (html.classList.contains('dark')) {
+                    localStorage.theme = 'dark';
+                    icon.className = "fa-solid fa-sun";
+                } else {
+                    localStorage.theme = 'light';
+                    icon.className = "fa-solid fa-moon";
+                }
+            });
+        }
+
+        // --- イベントリスナー設定 ---
+        function setupEventListeners() {
+            document.getElementById('admin-btn').addEventListener('click', () => {
+                if (state.mode === 'admin') {
+                    // 管理画面から抜ける
+                    window.location.href = window.location.pathname;
+                } else {
+                    requestAdminAccess();
+                }
+            });
+
+            // フォーム入力時の自動保存イベント委譲 (Event Delegation)
+            const container = document.getElementById('app-container');
+            container.addEventListener('input', (e) => {
+                if (state.mode === 'admin' && state.adminTab === 'edit') {
+                    // 入力があるたびにデータを同期して保存
+                    syncDOMtoState();
+                    saveData();
+                }
+            });
+        }
+
+        // --- 管理者認証 ---
+        function requestAdminAccess() {
+            if (state.isAdminAuthenticated) {
+                state.mode = 'admin';
+                render();
+                return;
+            }
+            const pass = prompt("管理者パスワードを入力してください:");
+            if (pass === ADMIN_PASSWORD) {
+                state.isAdminAuthenticated = true;
+                state.mode = 'admin';
+                render();
+            } else if (pass !== null) {
+                alert("パスワードが間違っています。");
+            }
+        }
+
+        // --- 画面描画制御 (ルーターの役割) ---
+        function render() {
+            const container = document.getElementById('app-container');
+            const adminBtn = document.getElementById('admin-btn');
+
+            if (state.mode === 'admin') {
+                adminBtn.textContent = "回答画面プレビュー";
+                container.innerHTML = `
+                    <div class="mb-6 flex gap-4 border-b border-gray-200 dark:border-gray-700">
+                        <button class="pb-2 px-1 ${state.adminTab === 'edit' ? 'tab-active font-bold' : ''}" onclick="switchAdminTab('edit')">編集</button>
+                        <button class="pb-2 px-1 ${state.adminTab === 'results' ? 'tab-active font-bold' : ''}" onclick="switchAdminTab('results')">結果管理</button>
+                    </div>
+                    ${state.adminTab === 'edit' ? getAdminEditHTML() : getAdminResultsHTML()}
+                `;
+            } else {
+                adminBtn.textContent = "管理画面";
+                container.innerHTML = getAnswerHTML();
+            }
+        }
+
+        function switchAdminTab(tab) {
+            state.adminTab = tab;
+            render();
+        }
+
+        // ==========================================
+        // 管理画面：アンケート編集機能
+        // ==========================================
+        function getAdminEditHTML() {
+            const url = window.location.origin + window.location.pathname;
+            
+            let html = `
+                <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm mb-6 border border-gray-200 dark:border-gray-700">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-lg font-bold"><i class="fa-solid fa-gear mr-2"></i>基本設定</h2>
+                        <button onclick="copyShareURL()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm transition">
+                            <i class="fa-solid fa-link mr-1"></i>回答URLをコピー
+                        </button>
+                    </div>
+                    <input type="text" id="survey-title" value="${escapeHTML(state.survey.title)}" placeholder="アンケートのタイトル" class="w-full text-2xl font-bold border-b-2 border-gray-300 dark:border-gray-600 bg-transparent focus:border-blue-500 outline-none py-2 mb-4">
+                    <textarea id="survey-desc" placeholder="アンケートの説明文" class="w-full border-b border-gray-300 dark:border-gray-600 bg-transparent focus:border-blue-500 outline-none py-2 resize-none h-20">${escapeHTML(state.survey.description)}</textarea>
+                </div>
+                
+                <div id="questions-container" class="space-y-6 mb-6">
+            `;
+
+            state.survey.questions.forEach((q, index) => {
+                html += `
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm border-l-4 border-blue-500 relative question-item" data-id="${q.id}">
+                        <div class="flex justify-between mb-4">
+                            <div class="flex gap-2">
+                                <span class="bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-xs font-bold text-gray-500 dark:text-gray-400 uppercase">${q.type}</span>
+                                <label class="flex items-center text-sm cursor-pointer">
+                                    <input type="checkbox" class="mr-1 q-required" ${q.required ? 'checked' : ''}> 必須
+                                </label>
+                            </div>
+                            <div class="flex gap-2 text-gray-400">
+                                ${index > 0 ? `<button onclick="moveQuestion('${q.id}', -1)" title="上へ"><i class="fa-solid fa-arrow-up hover:text-blue-500"></i></button>` : ''}
+                                ${index < state.survey.questions.length - 1 ? `<button onclick="moveQuestion('${q.id}', 1)" title="下へ"><i class="fa-solid fa-arrow-down hover:text-blue-500"></i></button>` : ''}
+                                <button onclick="deleteQuestion('${q.id}')" title="削除" class="ml-2 hover:text-red-500"><i class="fa-solid fa-trash"></i></button>
+                            </div>
+                        </div>
+                        <input type="text" class="w-full text-lg font-bold border-b border-gray-300 dark:border-gray-600 bg-transparent outline-none py-1 mb-4 q-text" value="${escapeHTML(q.text)}" placeholder="質問文を入力">
+                `;
+
+                if (q.type === 'radio' || q.type === 'checkbox' || q.type === 'quiz') {
+                    html += `<div class="space-y-2 ml-2 options-container">`;
+                    q.options.forEach((opt, optIdx) => {
+                        html += `
+                            <div class="flex items-center gap-2">
+                                <i class="${q.type === 'checkbox' ? 'fa-regular fa-square' : 'fa-regular fa-circle'} text-gray-400"></i>
+                                <input type="text" class="border-b border-gray-300 dark:border-gray-600 bg-transparent outline-none py-1 flex-1 q-option" value="${escapeHTML(opt)}" placeholder="選択肢">
+                                ${q.type === 'quiz' ? `<label class="text-xs flex items-center ml-2 text-green-600"><input type="radio" name="correct-${q.id}" class="mr-1 q-correct" ${q.correctIndex === optIdx ? 'checked' : ''} onchange="syncDOMtoState(); saveData();"> 正解</label>` : ''}
+                                <button onclick="removeOption('${q.id}', ${optIdx})" class="text-gray-400 hover:text-red-500"><i class="fa-solid fa-xmark"></i></button>
+                            </div>
+                        `;
+                    });
+                    html += `</div>
+                        <button onclick="addOption('${q.id}')" class="mt-3 text-sm text-blue-500 hover:text-blue-700"><i class="fa-solid fa-plus mr-1"></i>選択肢を追加</button>
+                    `;
+                }
+                
+                html += `</div>`;
+            });
+
+            html += `
+                </div>
+                <div class="flex flex-wrap gap-2 justify-center bg-gray-100 dark:bg-gray-800 p-4 rounded-lg border border-dashed border-gray-300 dark:border-gray-600">
+                    <button onclick="addQuestion('text')" class="bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 px-4 py-2 rounded shadow-sm hover:bg-gray-50 dark:hover:bg-gray-600 transition text-sm">
+                        <i class="fa-solid fa-font mr-1 text-gray-500"></i>記述式
+                    </button>
+                    <button onclick="addQuestion('radio')" class="bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 px-4 py-2 rounded shadow-sm hover:bg-gray-50 dark:hover:bg-gray-600 transition text-sm">
+                        <i class="fa-regular fa-circle-dot mr-1 text-gray-500"></i>単一選択
+                    </button>
+                    <button onclick="addQuestion('checkbox')" class="bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 px-4 py-2 rounded shadow-sm hover:bg-gray-50 dark:hover:bg-gray-600 transition text-sm">
+                        <i class="fa-regular fa-square-check mr-1 text-gray-500"></i>複数選択
+                    </button>
+                    <button onclick="addQuestion('quiz')" class="bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 px-4 py-2 rounded shadow-sm hover:bg-gray-50 dark:hover:bg-gray-600 transition text-sm">
+                        <i class="fa-solid fa-graduation-cap mr-1 text-gray-500"></i>クイズ
+                    </button>
+                </div>
+            `;
+            return html;
+        }
+
+        // --- 編集用アクション関数 ---
+        function addQuestion(type) {
+            syncDOMtoState(); // 現在の入力を保存
+            const newQ = {
+                id: 'q_' + Date.now(),
+                type: type,
+                text: "",
+                required: false,
+                options: (type !== 'text') ? ["選択肢 1"] : undefined,
+                correctIndex: (type === 'quiz') ? 0 : undefined
+            };
+            state.survey.questions.push(newQ);
+            saveData();
+            render();
+        }
+
+        function deleteQuestion(id) {
+            if(confirm('この質問を削除しますか？')) {
+                syncDOMtoState();
+                state.survey.questions = state.survey.questions.filter(q => q.id !== id);
+                saveData();
+                render();
+            }
+        }
+
+        function moveQuestion(id, direction) {
+            syncDOMtoState();
+            const idx = state.survey.questions.findIndex(q => q.id === id);
+            if (idx < 0) return;
+            const targetIdx = idx + direction;
+            if (targetIdx >= 0 && targetIdx < state.survey.questions.length) {
+                const temp = state.survey.questions[idx];
+                state.survey.questions[idx] = state.survey.questions[targetIdx];
+                state.survey.questions[targetIdx] = temp;
+                saveData();
+                render();
+            }
+        }
+
+        function addOption(qId) {
+            syncDOMtoState();
+            const q = state.survey.questions.find(q => q.id === qId);
+            if(q) {
+                q.options.push(`選択肢 ${q.options.length + 1}`);
+                saveData();
+                render();
+            }
+        }
+
+        function removeOption(qId, optIdx) {
+            syncDOMtoState();
+            const q = state.survey.questions.find(q => q.id === qId);
+            if(q && q.options.length > 1) {
+                q.options.splice(optIdx, 1);
+                // クイズの正解インデックスの調整
+                if(q.type === 'quiz') {
+                    if(q.correctIndex === optIdx) q.correctIndex = 0;
+                    else if(q.correctIndex > optIdx) q.correctIndex--;
+                }
+                saveData();
+                render();
+            }
+        }
+
+        // DOMの入力値をstateに同期する（自動保存のコア）
+        function syncDOMtoState() {
+            if (state.mode !== 'admin' || state.adminTab !== 'edit') return;
+            
+            const titleEl = document.getElementById('survey-title');
+            const descEl = document.getElementById('survey-desc');
+            if(titleEl) state.survey.title = titleEl.value;
+            if(descEl) state.survey.description = descEl.value;
+
+            document.querySelectorAll('.question-item').forEach(item => {
+                const id = item.getAttribute('data-id');
+                const q = state.survey.questions.find(q => q.id === id);
+                if(q) {
+                    q.text = item.querySelector('.q-text').value;
+                    q.required = item.querySelector('.q-required').checked;
+                    
+                    if (q.options) {
+                        const optInputs = item.querySelectorAll('.q-option');
+                        q.options = Array.from(optInputs).map(inp => inp.value);
+                    }
+                    if (q.type === 'quiz') {
+                        const correctRadios = item.querySelectorAll('.q-correct');
+                        correctRadios.forEach((radio, idx) => {
+                            if(radio.checked) q.correctIndex = idx;
+                        });
+                    }
+                }
+            });
+        }
+
+        function copyShareURL() {
+            // URLからクエリパラメータを除いたものを共有URLとする
+            const url = window.location.origin + window.location.pathname;
+            navigator.clipboard.writeText(url).then(() => {
+                alert("回答用URLをクリップボードにコピーしました！\n" + url);
+            });
+        }
+
+        // ==========================================
+        // 回答画面
+        // ==========================================
+        function getAnswerHTML() {
+            if (!state.survey.title && state.survey.questions.length === 0) {
+                return `<div class="text-center py-20 text-gray-500">現在公開されているアンケートはありません。</div>`;
+            }
+
+            let html = `
+                <div class="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-md mb-8 border-t-8 border-blue-500">
+                    <h1 class="text-3xl font-bold mb-4">${escapeHTML(state.survey.title)}</h1>
+                    <p class="whitespace-pre-wrap text-gray-600 dark:text-gray-300">${escapeHTML(state.survey.description)}</p>
+                </div>
+                
+                <form id="answer-form" onsubmit="submitAnswer(event)" class="space-y-6">
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
+                        <label class="block mb-2 font-bold">お名前 <span class="text-red-500 text-sm ml-1">*必須</span></label>
+                        <input type="text" name="respondent_name" required class="w-full md:w-1/2 p-2 border border-gray-300 dark:border-gray-600 rounded bg-transparent focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+            `;
+
+            state.survey.questions.forEach(q => {
+                const reqHTML = q.required ? `<span class="text-red-500 text-sm ml-1">*</span>` : '';
+                html += `
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
+                        <h3 class="font-bold mb-4 text-lg">${escapeHTML(q.text)} ${reqHTML}</h3>
+                `;
+
+                if (q.type === 'text') {
+                    html += `<input type="text" name="${q.id}" ${q.required ? 'required' : ''} class="w-full p-2 border border-gray-300 dark:border-gray-600 rounded bg-transparent focus:ring-2 focus:ring-blue-500 outline-none">`;
+                } else if (q.type === 'radio' || q.type === 'quiz') {
+                    html += `<div class="space-y-2">`;
+                    q.options.forEach((opt, idx) => {
+                        html += `
+                            <label class="flex items-center cursor-pointer p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded transition">
+                                <input type="radio" name="${q.id}" value="${escapeHTML(opt)}" ${q.required ? 'required' : ''} class="mr-3 w-4 h-4 text-blue-600">
+                                <span>${escapeHTML(opt)}</span>
+                            </label>
+                        `;
+                    });
+                    html += `</div>`;
+                } else if (q.type === 'checkbox') {
+                    html += `<div class="space-y-2">`;
+                    // checkboxの必須バリデーションはJSで独自に行うためHTMLのrequiredは外す
+                    q.options.forEach((opt, idx) => {
+                        html += `
+                            <label class="flex items-center cursor-pointer p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded transition">
+                                <input type="checkbox" name="${q.id}" value="${escapeHTML(opt)}" class="mr-3 w-4 h-4 text-blue-600 checkbox-group-${q.id}">
+                                <span>${escapeHTML(opt)}</span>
+                            </label>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+
+                html += `</div>`;
+            });
+
+            html += `
+                <div class="text-center pt-4">
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition transform hover:scale-105">
+                        <i class="fa-regular fa-paper-plane mr-2"></i>送信する
+                    </button>
+                    <p class="text-xs text-gray-500 mt-4">※フロントエンド完結版のため、送信内容はローカルストレージ（お使いのブラウザ）にのみ保存されます。</p>
+                </div>
+                </form>
+            `;
+            return html;
+        }
+
+        // --- 回答送信処理 ---
+        function submitAnswer(e) {
+            e.preventDefault();
+            const form = e.target;
+            const formData = new FormData(form);
+            const answerData = {
+                timestamp: new Date().toISOString(),
+                respondent: formData.get('respondent_name'),
+                answers: {}
+            };
+
+            // チェックボックスの必須バリデーション
+            let isValid = true;
+            state.survey.questions.forEach(q => {
+                if (q.type === 'checkbox') {
+                    const checked = form.querySelectorAll(`.checkbox-group-${q.id}:checked`);
+                    if (q.required && checked.length === 0) {
+                        alert(`「${q.text}」は必須項目です。少なくとも1つ選択してください。`);
+                        isValid = false;
+                    }
+                    answerData.answers[q.id] = Array.from(checked).map(cb => cb.value);
+                } else {
+                    answerData.answers[q.id] = formData.get(q.id) || "";
+                }
+            });
+
+            if (!isValid) return;
+
+            // 1. ローカルストレージへの保存（デモ・シミュレーション用）
+            let localAnswers = JSON.parse(localStorage.getItem(ANSWERS_KEY) || "[]");
+            localAnswers.push(answerData);
+            localStorage.setItem(ANSWERS_KEY, JSON.stringify(localAnswers));
+
+            // 2. 実際の運用向け: FormspreeやEmailJSへの送信処理
+            if (FORMSPREE_ENDPOINT) {
+                // Formspreeに送信するためのデータ整形
+                const emailPayload = new FormData();
+                emailPayload.append("Name", answerData.respondent);
+                state.survey.questions.forEach(q => {
+                    const ans = answerData.answers[q.id];
+                    emailPayload.append(q.text, Array.isArray(ans) ? ans.join(', ') : ans);
+                });
+
+                fetch(FORMSPREE_ENDPOINT, {
+                    method: 'POST',
+                    body: emailPayload,
+                    headers: { 'Accept': 'application/json' }
+                }).then(response => {
+                    if (!response.ok) console.error("メール送信エラー");
+                });
+            }
+
+            // 完了画面
+            document.getElementById('app-container').innerHTML = `
+                <div class="bg-white dark:bg-gray-800 p-10 rounded-xl shadow-md text-center border-t-8 border-green-500">
+                    <i class="fa-regular fa-circle-check text-6xl text-green-500 mb-4"></i>
+                    <h2 class="text-2xl font-bold mb-2">回答を送信しました！</h2>
+                    <p class="text-gray-600 dark:text-gray-400">ご協力ありがとうございました。</p>
+                </div>
+            `;
+        }
+
+        // ==========================================
+        // 管理画面：結果確認機能
+        // ==========================================
+        function getAdminResultsHTML() {
+            // ローカルストレージからシミュレートした回答を取得
+            const localAnswers = JSON.parse(localStorage.getItem(ANSWERS_KEY) || "[]");
+            
+            let html = `
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold"><i class="fa-solid fa-chart-pie mr-2"></i>回答結果</h2>
+                    <button onclick="render()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm transition shadow-sm">
+                        <i class="fa-solid fa-arrows-rotate mr-1"></i>回答を更新
+                    </button>
+                </div>
+            `;
+
+            if (localAnswers.length === 0) {
+                html += `<div class="bg-white dark:bg-gray-800 p-8 rounded-lg text-center text-gray-500 border border-gray-200 dark:border-gray-700">まだ回答がありません。</div>`;
+                return html;
+            }
+
+            html += `<p class="mb-4">総回答数: <span class="font-bold text-blue-600 text-xl">${localAnswers.length}</span> 件</p>`;
+
+            // 各質問ごとの集計表示
+            state.survey.questions.forEach(q => {
+                html += `
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 mb-6">
+                        <h3 class="font-bold mb-4 border-b border-gray-200 dark:border-gray-700 pb-2">${escapeHTML(q.text)}</h3>
+                `;
+
+                if (q.type === 'text') {
+                    html += `<ul class="space-y-2 max-h-40 overflow-y-auto">`;
+                    localAnswers.forEach(ans => {
+                        const val = ans.answers[q.id];
+                        if (val) html += `<li class="p-2 bg-gray-50 dark:bg-gray-700 rounded text-sm"><span class="font-bold text-gray-400 mr-2">${escapeHTML(ans.respondent)}:</span> ${escapeHTML(val)}</li>`;
+                    });
+                    html += `</ul>`;
+                } else {
+                    // 選択肢の集計
+                    let counts = {};
+                    q.options.forEach(opt => counts[opt] = 0);
+                    
+                    localAnswers.forEach(ans => {
+                        const val = ans.answers[q.id];
+                        if (Array.isArray(val)) {
+                            val.forEach(v => { if (counts[v] !== undefined) counts[v]++; });
+                        } else {
+                            if (counts[val] !== undefined) counts[val]++;
+                        }
+                    });
+
+                    html += `<div class="space-y-3">`;
+                    q.options.forEach((opt, idx) => {
+                        const count = counts[opt];
+                        const percent = localAnswers.length > 0 ? Math.round((count / localAnswers.length) * 100) : 0;
+                        const isCorrect = (q.type === 'quiz' && q.correctIndex === idx);
+                        
+                        html += `
+                            <div>
+                                <div class="flex justify-between text-sm mb-1">
+                                    <span>${escapeHTML(opt)} ${isCorrect ? '<i class="fa-solid fa-check text-green-500 ml-1" title="正解"></i>' : ''}</span>
+                                    <span class="font-bold">${count}件 (${percent}%)</span>
+                                </div>
+                                <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+                                    <div class="bg-${isCorrect ? 'green' : 'blue'}-600 h-2.5 rounded-full" style="width: ${percent}%"></div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                }
+                html += `</div>`;
+            });
+
+            return html;
+        }
+
+        // --- ユーティリティ ---
+        function escapeHTML(str) {
+            if (!str) return "";
+            return str.replace(/[&<>'"]/g, 
+                tag => ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    "'": '&#39;',
+                    '"': '&quot;'
+                }[tag])
+            );
+        }
+
+        // アプリケーション起動
+        window.onload = init;
+    </script>
+</body>
+</html>
